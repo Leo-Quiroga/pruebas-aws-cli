@@ -1,0 +1,32 @@
+# Entorno virtual
+.venv/
+venv/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Credenciales y archivos sensibles
+.env
+.aws/credentials
+.aws/config
+*.pem
+*.key
