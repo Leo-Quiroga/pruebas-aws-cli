@@ -1,0 +1,22 @@
+========== INFORME INVENTARIO AWS ==========
+Fecha de ejecución: 2026-03-19 00:06:19.116065
+
+========== RECURSOS EC2 ==========
+No hay instancias EC2 registradas.
+
+========== RECURSOS S3 ==========
+Bucket 1
+  Nombre: bucket-pruebas-awscli-restar
+  Fecha creación: 2026-03-18 22:47:48+00:00
+
+========== RECURSOS IAM ==========
+No hay usuarios IAM registrados.
+
+========== RESUMEN GENERAL ==========
+Total EC2: 0
+Total S3: 1
+Total IAM: 0
+
+========== ALERTAS ==========
+Alerta EC2 alta: NO
+Alerta S3 alta: SI
