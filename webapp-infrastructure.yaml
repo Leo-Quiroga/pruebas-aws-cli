@@ -1,0 +1,397 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Infraestructura típica de aplicación web:
+  VPC con subredes pública y privada, IGW, NAT Gateway,
+  EC2 web server, Security Groups y Route Tables.
+  Opcional: ELB con múltiples instancias EC2.
+
+# ─────────────────────────────────────────
+# PARÁMETROS
+# Valores configurables sin tocar el template.
+# Puedes cambiarlos al momento de crear el stack.
+# ─────────────────────────────────────────
+Parameters:
+
+  EnvironmentName:
+    Description: Prefijo para identificar los recursos (ej. "dev", "prod")
+    Type: String
+    Default: dev
+
+  VpcCIDR:
+    Description: Rango de IPs de la VPC
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnetCIDR:
+    Description: Rango de IPs de la subred pública
+    Type: String
+    Default: 10.0.1.0/24
+
+  PrivateSubnetCIDR:
+    Description: Rango de IPs de la subred privada
+    Type: String
+    Default: 10.0.2.0/24
+
+  InstanceType:
+    Description: Tipo de instancia EC2
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+
+  KeyName:
+    Description: Nombre del Key Pair para acceder por SSH (debe existir en tu cuenta)
+    Type: AWS::EC2::KeyPair::KeyName
+
+  # Parámetro para habilitar el ELB (opcional)
+  EnableLoadBalancer:
+    Description: ¿Desplegar Elastic Load Balancer con múltiples instancias?
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+# ─────────────────────────────────────────
+# CONDICIONES
+# Controlan qué recursos se crean según los parámetros.
+# ─────────────────────────────────────────
+Conditions:
+  CreateLoadBalancer: !Equals [!Ref EnableLoadBalancer, 'true']
+
+# ─────────────────────────────────────────
+# MAPPINGS
+# Tabla de AMIs por región. Usamos Amazon Linux 2.
+# ─────────────────────────────────────────
+Mappings:
+  RegionAMI:
+    us-east-1:
+      AMI: ami-0c02fb55956c7d316
+    us-west-2:
+      AMI: ami-0ceecbb0f30a902a6
+    eu-west-1:
+      AMI: ami-0d71ea30463e0ff49
+
+# ─────────────────────────────────────────
+# RECURSOS
+# Aquí se define toda la infraestructura.
+# Orden lógico: red → seguridad → cómputo
+# ─────────────────────────────────────────
+Resources:
+
+  # ╔══════════════════════════════╗
+  # ║         RED / VPC            ║
+  # ╚══════════════════════════════╝
+
+  # 1. La VPC — la red privada virtual raíz
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsHostnames: true   # Permite que las instancias tengan nombres DNS
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-VPC
+
+  # 2. Internet Gateway — conecta la VPC con internet
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-IGW
+
+  # 3. Attachment — el IGW debe "engancharse" a la VPC
+  #    Sin este paso, el gateway existe pero no sirve.
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # 4. Subred pública — aquí viven los recursos accesibles desde internet
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCIDR
+      AvailabilityZone: !Select [0, !GetAZs '']   # Primera AZ disponible en la región
+      MapPublicIpOnLaunch: true                    # Cada EC2 aquí recibe IP pública automáticamente
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PublicSubnet
+
+  # 5. Subred privada — recursos sin acceso directo desde internet
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetCIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false                   # Sin IP pública
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PrivateSubnet
+
+  # 6. IP elástica para el NAT Gateway
+  #    El NAT necesita una IP pública fija para salir a internet
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway   # Espera que el IGW esté listo
+    Properties:
+      Domain: vpc
+
+  # 7. NAT Gateway — en la subred PÚBLICA
+  #    Permite que la subred privada salga a internet, pero no que entren conexiones.
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet             # ← Importante: siempre en la subred pública
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-NATGateway
+
+  # ╔══════════════════════════════╗
+  # ║       ROUTE TABLES           ║
+  # ╚══════════════════════════════╝
+
+  # 8. Route Table para la subred pública
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PublicRT
+
+  # 9. Ruta por defecto de la subred pública → sale por el IGW
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0         # Todo el tráfico externo...
+      GatewayId: !Ref InternetGateway          # ...sale por el IGW
+
+  # 10. Asociar la Route Table pública con la subred pública
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # 11. Route Table para la subred privada
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-PrivateRT
+
+  # 12. Ruta por defecto de la subred privada → sale por el NAT
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway           # ← Sale por el NAT, no por el IGW
+
+  # 13. Asociar la Route Table privada con la subred privada
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ╔══════════════════════════════╗
+  # ║       SECURITY GROUPS        ║
+  # ╚══════════════════════════════╝
+
+  # 14. Security Group para el Web Server
+  #     Permite HTTP (80), HTTPS (443) desde cualquier lugar, y SSH desde cualquier lugar
+  #     (En producción, limita SSH a tu IP)
+  WebServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG para el servidor web
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0          # HTTP desde internet
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0          # HTTPS desde internet
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0          # SSH — restringe esto en producción
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-WebServerSG
+
+  # 15. Security Group para el Load Balancer (solo se crea si EnableLoadBalancer = true)
+  LoadBalancerSG:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateLoadBalancer
+    Properties:
+      GroupDescription: SG para el Load Balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ALBSG
+
+  # ╔══════════════════════════════╗
+  # ║         EC2 INSTANCES        ║
+  # ╚══════════════════════════════╝
+
+  # 16. Instancia EC2 — Web Server
+  #     UserData = script que se ejecuta al arrancar la instancia por primera vez
+  WebServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionAMI, !Ref AWS::Region, AMI]
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref WebServerSG
+      UserData:
+        # UserData debe estar en Base64. Fn::Base64 lo convierte automáticamente.
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          echo "Hello from AWS CloudFormation Lab - ${EnvironmentName}" > /var/www/html/index.html
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-WebServer
+
+  # ╔══════════════════════════════╗
+  # ║    OPCIONAL: LOAD BALANCER   ║
+  # ╚══════════════════════════════╝
+
+  # Todos los recursos siguientes solo se crean si EnableLoadBalancer = true
+
+  # 17. Segunda instancia EC2 para el balanceo
+  WebServerInstance2:
+    Type: AWS::EC2::Instance
+    Condition: CreateLoadBalancer
+    Properties:
+      ImageId: !FindInMap [RegionAMI, !Ref AWS::Region, AMI]
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref WebServerSG
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          echo "Hello from WebServer-2 - ${EnvironmentName}" > /var/www/html/index.html
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-WebServer2
+
+  # 18. Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: CreateLoadBalancer
+    Properties:
+      Name: !Sub ${EnvironmentName}-ALB
+      Scheme: internet-facing           # Accesible desde internet
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet
+      SecurityGroups:
+        - !Ref LoadBalancerSG
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-ALB
+
+  # 19. Target Group — los EC2 que recibirán el tráfico del ALB
+  #     Incluye el health check: si /index.html responde 200, la instancia está sana
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateLoadBalancer
+    Properties:
+      Name: !Sub ${EnvironmentName}-TG
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      HealthCheckPath: /index.html
+      HealthCheckIntervalSeconds: 30   # Revisar cada 30s
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2         # 2 checks exitosos = sano
+      UnhealthyThresholdCount: 5       # 5 failures = enfermo
+      Targets:
+        - Id: !Ref WebServerInstance
+          Port: 80
+        - Id: !Ref WebServerInstance2
+          Port: 80
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-TargetGroup
+
+  # 20. Listener — define que el ALB escucha en el puerto 80 y reenvía al Target Group
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateLoadBalancer
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+# ─────────────────────────────────────────
+# OUTPUTS
+# Valores que CloudFormation muestra al terminar.
+# Útiles para obtener URLs, IDs, etc.
+# ─────────────────────────────────────────
+Outputs:
+
+  VPCId:
+    Description: ID de la VPC creada
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${EnvironmentName}-VPCId
+
+  PublicSubnetId:
+    Description: ID de la subred pública
+    Value: !Ref PublicSubnet
+
+  PrivateSubnetId:
+    Description: ID de la subred privada
+    Value: !Ref PrivateSubnet
+
+  WebServerPublicIP:
+    Description: IP pública del servidor web
+    Value: !GetAtt WebServerInstance.PublicIp
+
+  WebServerURL:
+    Description: URL del servidor web
+    Value: !Sub http://${WebServerInstance.PublicDnsName}
+
+  LoadBalancerDNS:
+    Description: DNS del Load Balancer (solo si está habilitado)
+    Condition: CreateLoadBalancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
